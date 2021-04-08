@@ -1,0 +1,134 @@
+#!/usr/bin/env php
+<?php
+/**
+ *
+ */
+use Magento\Framework\App\Bootstrap;
+
+foreach ([
+    dirname(__DIR__), // bin
+    dirname(dirname(__DIR__)), // vendor/bin
+    dirname(dirname(dirname(dirname(__DIR__)))), // vendor/fishpig/magento2-dependency-detective/bin
+] as $basePath) {
+    $bootstrapFile = $basePath . '/app/bootstrap.php';
+
+    if (is_file($bootstrapFile)) {
+        require $bootstrapFile;
+        break;
+    }
+}
+
+if (!class_exists(Bootstrap::class)) {
+    echo "Could not find a Magento installation.";
+    exit(1);
+}
+
+$bootstrap     = Bootstrap::create(BP, $_SERVER);
+$objectManager = $bootstrap->getObjectManager();
+
+$classQueue      = $objectManager->get(\FishPig\DependencyDetective\ClassQueue::class);
+$classFileParser = $objectManager->get(\FishPig\DependencyDetective\ClassFileParser::class);
+
+try {
+    if ($argc < 2) {
+        throw new \Exception('Please provide module name.');
+    }
+    
+    $moduleName = $argv[1];
+    
+    if (!$objectManager->get(\Magento\Framework\Module\Manager::class)->isEnabled($moduleName)) {
+        throw new \Exception('Module not enabled.');
+    }
+    
+    $moduleDir = $objectManager->get(\Magento\Framework\Module\Dir::class)->getDir(
+        $moduleName
+    );
+    
+    if (!$moduleDir || !is_dir($moduleDir)) {
+        throw new \Exception('Cannot find module dir.');
+    }
+
+    if (($files = trim(shell_exec('find ' . $moduleDir . ' -type f -name \*.php ! -path "*/Test/*"'))) === '') {
+        throw new \Exception('NO files found.');
+    }
+    
+    $missingClasses = [];
+    
+    foreach (explode("\n", $files) as $file) {
+        $fileName = basename($file);
+        
+        if (in_array($fileName, ['registration.php'])) {
+            continue;
+        }
+
+        $data = file_get_contents($file);
+
+        if ($className = $classFileParser->getClassName($data)) {
+            $classQueue->add($classFileParser->getNamespace($data) . '\\' . $className);
+    
+            if ($extends = $classFileParser->getExtends($data)) {
+                $classQueue->add($extends);
+            }
+        }
+    }
+
+    while (($class = $classQueue->get()) !== false) {        
+        try {            
+            if (preg_match('/Interface$/', $class)) {
+                continue;
+            }
+
+            // Remove built in classes
+            if (strpos($class, '\\') === false && strpos($class, '_') === false) {
+                continue;
+            }
+
+            if (!class_exists('\\' . trim($class))) {
+                $missingClasses[] = $class;
+                continue;
+            }
+                        
+            $rclass = new ReflectionClass($class);
+    
+            if ($constructor = $rclass->getConstructor()) {
+                if ($params = $constructor->getParameters()) {
+                    foreach ($params as $param) {
+                        if ($paramType = $param->getType()) {
+                            if (!$paramType->isBuiltin()) {
+                                $classQueue->add($paramType->getName());
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            echo 'Error in ' . $class . PHP_EOL . 'Exception was: ' . $e->getMessage() . PHP_EOL;
+        }
+    }
+    
+    if ($refModules = $classQueue->getModulesReferencedInTargetModule()) {
+        echo "The following modules are referenced in " . $moduleName . "." . PHP_EOL;
+        
+        foreach ($refModules as $module) {
+            echo ' ' . $module . PHP_EOL;
+        }
+
+        echo PHP_EOL;
+    }
+    
+    if ($missingClasses) {
+        echo 'The following classes were called directly by ' . $moduleName . ' and are missing from your system.' . PHP_EOL;
+        echo 'You may need to create mocks for them or install the source module.' . PHP_EOL;
+        echo PHP_EOL;
+        
+        foreach ($missingClasses as $class) {
+            echo ' ' . $class . PHP_EOL;
+        }
+
+        echo PHP_EOL;
+    }
+}
+catch (Exception $e) {
+	echo PHP_EOL . 'Exception: ' . $e->getMessage() . PHP_EOL . PHP_EOL . "  " . str_replace("\n", "\n  ", $e->getTraceAsString());
+	exit(1);
+}

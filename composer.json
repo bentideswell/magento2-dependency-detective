@@ -1,0 +1,13 @@
+{
+    "name": "fishpig/magento2-dependency-detective",
+    "description": "Find the true dependencies for a Magento module",
+    "version": "1.0.0",
+    "bin": [
+        "bin/deps_detective"
+    ],
+    "autoload": {
+        "psr-4": {
+            "FishPig\\DependencyDetective\\": "src"
+        }
+    }
+}
